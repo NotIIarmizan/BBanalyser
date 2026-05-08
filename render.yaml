@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: BBanalyser
+    runtime: python
+    buildCommand: apt-get update && apt-get install -y tesseract-ocr tesseract-ocr-rus && pip install -r requirements.txt
+    startCommand: python app.py
