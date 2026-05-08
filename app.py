@@ -1,4 +1,20 @@
 import os
+import subprocess
+import sys
+
+# Автоустановка tesseract на Render
+try:
+    import pytesseract
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pytesseract"])
+    import pytesseract
+
+# Проверяем, установлен ли tesseract в системе
+try:
+    subprocess.run(["tesseract", "--version"], capture_output=True, check=True)
+except:
+    subprocess.run("apt-get update && apt-get install -y tesseract-ocr tesseract-ocr-rus", shell=True)
+
 import sqlite3
 import re
 import tempfile
@@ -164,47 +180,51 @@ async def reply_with_result(msg, num):
         reply_markup=main_keyboard()
     )
 
-# ====== КОМАНДА /start ======
+# ====== КОМАНДЫ ======
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logging.info("Команда /start")
     await update.message.reply_text(
         "🎰 Анализатор Бот Бандита\n\n"
-        "👥 Группа: добавь меня в чат с @banditchatbot — я сам буду считывать числа\n"
-        "💬 Личка: перешли сообщение или скрин — распознаю вручную\n"
+        "👥 Группа: добавь меня в чат с @banditchatbot\n"
+        "💬 Личка: перешли сообщение или скрин\n"
         "🔢 Или просто напиши число 0-36\n\n"
         "Кнопки ниже 👇",
         reply_markup=main_keyboard()
     )
 
-# ====== РЕЖИМ 1: АВТО-ЗАХВАТ В ГРУППАХ ======
+# ====== АВТО-ЗАХВАТ ======
 async def auto_detect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.from_user: return
     
-    logging.info(f"Сообщение от @{msg.from_user.username}: photo={bool(msg.photo)}")
+    sender_username = msg.from_user.username or ""
+    logging.info(f"Сообщение от @{sender_username}: photo={bool(msg.photo)}")
     
-    if msg.from_user.username != TARGET_BOT: return
+    # Проверяем и по username, и по id (на случай если username пустой)
+    if sender_username.lower() != TARGET_BOT.lower():
+        return
+    
     if not msg.photo:
         logging.info("Пропущено: нет фото")
         return
     
-    logging.info("Обрабатываю фото от Бот Бандита...")
+    logging.info("Захватываю фото от Бот Бандита...")
     file = await msg.photo[-1].get_file()
     file_bytes = await file.download_as_bytearray()
     num = extract_number_from_image(file_bytes)
     if num is not None:
         await reply_with_result(msg, num)
     else:
-        logging.warning("Не удалось распознать число в авто-режиме")
-        await msg.reply_text("❌ Не удалось распознать число.", reply_markup=main_keyboard())
+        logging.warning("Не распознано в авто-режиме")
 
-# ====== РЕЖИМ 2: РУЧНОЙ ВВОД ======
+# ====== РУЧНОЙ ВВОД ======
 async def handle_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg: return
     
-    # Пропускаем сообщения от Бот Бандита
-    if msg.from_user and msg.from_user.username == TARGET_BOT: return
+    sender_username = (msg.from_user.username or "").lower() if msg.from_user else ""
+    if sender_username == TARGET_BOT:
+        return
     
     # Фото
     if msg.photo:
@@ -215,22 +235,20 @@ async def handle_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if num is not None:
             await reply_with_result(msg, num)
         else:
-            await msg.reply_text("❌ Не удалось распознать число. Напиши его текстом (0-36).", reply_markup=main_keyboard())
+            await msg.reply_text("❌ Не удалось распознать. Напиши число текстом (0-36).", reply_markup=main_keyboard())
         return
     
-    # Текст (включая caption)
+    # Текст
     text = msg.text or msg.caption or ""
     if not text: return
     
-    logging.info(f"Ручной режим: текст='{text[:100]}'")
+    logging.info(f"Ручной режим: '{text[:100]}'")
     
-    # Ищем число в тексте
     num = extract_number_from_text(text)
     if num is not None:
         await reply_with_result(msg, num)
         return
     
-    # Просто число?
     match = re.match(r'^\s*(\d{1,2})\s*$', text.strip())
     if match:
         num = int(match.group(1))
@@ -239,29 +257,21 @@ async def handle_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ====== КНОПКИ ======
 async def btn_stats(update, context): 
-    logging.info("Кнопка: Статистика")
     await update.message.reply_text(format_stats(get_stats()), reply_markup=main_keyboard())
-
 async def btn_patterns(update, context): 
-    logging.info("Кнопка: Закономерности")
     await update.message.reply_text(find_patterns(), reply_markup=main_keyboard())
-
 async def btn_last(update, context):
-    logging.info("Кнопка: Последние 10")
     c.execute("SELECT number FROM spins ORDER BY id DESC LIMIT 10")
     nums = [str(r[0]) for r in c.fetchall()]
     await update.message.reply_text(f"Последние 10: {' → '.join(nums)}" if nums else "Нет данных.", reply_markup=main_keyboard())
-
 async def btn_help(update, context):
     await update.message.reply_text(
         "🎰 Анализатор Бот Бандита\n\n"
-        "👥 Группа: добавь меня в чат с @banditchatbot — я сам буду считывать числа\n"
-        "💬 Личка: перешли сообщение или скрин — распознаю вручную\n"
-        "🔢 Или просто напиши число 0-36\n\n"
-        "Кнопки ниже 👇",
+        "👥 Группа: добавь меня в чат с @banditchatbot\n"
+        "💬 Личка: перешли сообщение или скрин\n"
+        "🔢 Или просто напиши число 0-36",
         reply_markup=main_keyboard()
     )
-
 async def btn_reset(update, context):
     if update.effective_user.id != OWNER_ID:
         await update.message.reply_text("⛔ Только @IIarmizan.", reply_markup=main_keyboard())
@@ -291,26 +301,17 @@ def main():
     if not TOKEN: return
     app = ApplicationBuilder().token(TOKEN).build()
     
-    # Команды
     app.add_handler(CommandHandler("start", cmd_start))
-    
-    # Авто-захват от Бот Бандита
     app.add_handler(MessageHandler(filters.PHOTO & filters.User(username=TARGET_BOT), auto_detect))
-    
-    # Кнопки
     app.add_handler(MessageHandler(filters.Regex("📊 Статистика"), btn_stats))
     app.add_handler(MessageHandler(filters.Regex("🔍 Закономерности"), btn_patterns))
     app.add_handler(MessageHandler(filters.Regex("🕐 Последние 10"), btn_last))
     app.add_handler(MessageHandler(filters.Regex("🗑 Сбросить"), btn_reset))
     app.add_handler(MessageHandler(filters.Regex("❓ Помощь"), btn_help))
-    
-    # Callback для сброса
     app.add_handler(CallbackQueryHandler(reset_callback, pattern="reset_"))
-    
-    # Ручной ввод (фото + текст) — всё, что не попало выше
     app.add_handler(MessageHandler(filters.PHOTO | filters.TEXT | filters.CAPTION, handle_manual))
     
-    logging.info("Бот запущен. Режимы: авто в группах + ручной в личке.")
+    logging.info("Бот запущен.")
     app.run_polling()
 
 if __name__ == '__main__':
