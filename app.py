@@ -1,26 +1,10 @@
 import os
-import subprocess
-import sys
-
-# Автоустановка tesseract на Render
-try:
-    import pytesseract
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pytesseract"])
-    import pytesseract
-
-# Проверяем, установлен ли tesseract в системе
-try:
-    subprocess.run(["tesseract", "--version"], capture_output=True, check=True)
-except:
-    subprocess.run("apt-get update && apt-get install -y tesseract-ocr tesseract-ocr-rus", shell=True)
-
 import sqlite3
 import re
 import tempfile
 import logging
 from PIL import Image
-import pytesseract
+from paddleocr import PaddleOCR
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
@@ -28,6 +12,11 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 
 OWNER_ID = 7602966724
 TARGET_BOT = "banditchatbot"
+
+# Инициализация PaddleOCR (один раз)
+logging.info("Загружаю PaddleOCR...")
+ocr = PaddleOCR(lang='en', use_angle_cls=False, show_log=False)
+logging.info("PaddleOCR готов.")
 
 DB_PATH = os.path.expanduser("~/roulette_stats.db")
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -44,7 +33,6 @@ c.execute('''CREATE TABLE IF NOT EXISTS spins
               timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 conn.commit()
 
-# ====== КЛАВИАТУРА ======
 def main_keyboard():
     keyboard = [
         [KeyboardButton("📊 Статистика"), KeyboardButton("🔍 Закономерности"), KeyboardButton("🕐 Последние 10")],
@@ -52,7 +40,6 @@ def main_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-# ====== СВОЙСТВА ЧИСЕЛ ======
 def get_props(n):
     if n == 0:
         return {'color': 'зелёное', 'parity': 'ноль', 'half': 'ноль', 'dozen': 'ноль'}
@@ -69,9 +56,8 @@ def save_spin(n, p, chat_id=0):
     c.execute("INSERT INTO spins (number, color, parity, half, dozen, chat_id) VALUES (?,?,?,?,?,?)",
               (n, p['color'], p['parity'], p['half'], p['dozen'], chat_id))
     conn.commit()
-    logging.info(f"Сохранено: {n} | {p['color']} | {p['parity']} | {p['half']} | {p['dozen']}")
+    logging.info(f"Сохранено: {n} | {p['color']} | {p['parity']}")
 
-# ====== СТАТИСТИКА ======
 def get_stats():
     c.execute("SELECT COUNT(*) FROM spins")
     total = c.fetchone()[0]
@@ -137,7 +123,6 @@ def find_patterns():
     max_series = max(max_series, cur)
     return f"🔍 Закономерности ({len(numbers)} спинов):\n\nПовторы: {repeats}\nСмен цвета: {switches}\nМакс. серия цвета: {max_series}"
 
-# ====== РАСПОЗНАВАНИЕ ======
 def extract_number_from_text(text):
     if not text: return None
     for line in text.split('\n'):
@@ -161,12 +146,18 @@ def extract_number_from_image(file_bytes):
         ]
         for crop_area in crops:
             crop = img.crop(crop_area)
-            text = pytesseract.image_to_string(crop, config='--psm 6')
-            logging.info(f"OCR text: {text[:100]}")
-            num = extract_number_from_text(text)
-            if num is not None:
-                os.unlink(tmp_path)
-                return num
+            crop_path = tmp_path + "_crop.jpg"
+            crop.save(crop_path)
+            result = ocr.ocr(crop_path, cls=False)
+            os.unlink(crop_path)
+            if result and result[0]:
+                for line in result[0]:
+                    text = line[1][0]
+                    logging.info(f"PaddleOCR: {text}")
+                    num = extract_number_from_text(text)
+                    if num is not None:
+                        os.unlink(tmp_path)
+                        return num
         os.unlink(tmp_path)
     except Exception as e:
         logging.error(f"OCR error: {e}")
@@ -180,82 +171,57 @@ async def reply_with_result(msg, num):
         reply_markup=main_keyboard()
     )
 
-# ====== КОМАНДЫ ======
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logging.info("Команда /start")
+async def cmd_start(update, context):
     await update.message.reply_text(
         "🎰 Анализатор Бот Бандита\n\n"
         "👥 Группа: добавь меня в чат с @banditchatbot\n"
         "💬 Личка: перешли сообщение или скрин\n"
-        "🔢 Или просто напиши число 0-36\n\n"
-        "Кнопки ниже 👇",
+        "🔢 Или напиши число 0-36",
         reply_markup=main_keyboard()
     )
 
-# ====== АВТО-ЗАХВАТ ======
-async def auto_detect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def auto_detect(update, context):
     msg = update.message
     if not msg or not msg.from_user: return
-    
-    sender_username = msg.from_user.username or ""
-    logging.info(f"Сообщение от @{sender_username}: photo={bool(msg.photo)}")
-    
-    # Проверяем и по username, и по id (на случай если username пустой)
-    if sender_username.lower() != TARGET_BOT.lower():
-        return
-    
-    if not msg.photo:
-        logging.info("Пропущено: нет фото")
-        return
-    
-    logging.info("Захватываю фото от Бот Бандита...")
+    if (msg.from_user.username or "").lower() != TARGET_BOT: return
+    if not msg.photo: return
+    logging.info("Авто-захват фото...")
     file = await msg.photo[-1].get_file()
     file_bytes = await file.download_as_bytearray()
     num = extract_number_from_image(file_bytes)
     if num is not None:
         await reply_with_result(msg, num)
     else:
-        logging.warning("Не распознано в авто-режиме")
+        logging.warning("Не распознано")
 
-# ====== РУЧНОЙ ВВОД ======
-async def handle_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_manual(update, context):
     msg = update.message
     if not msg: return
-    
-    sender_username = (msg.from_user.username or "").lower() if msg.from_user else ""
-    if sender_username == TARGET_BOT:
-        return
-    
-    # Фото
+    if msg.from_user and (msg.from_user.username or "").lower() == TARGET_BOT: return
+
     if msg.photo:
-        logging.info("Ручной режим: фото")
+        logging.info("Ручной: фото")
         file = await msg.photo[-1].get_file()
         file_bytes = await file.download_as_bytearray()
         num = extract_number_from_image(file_bytes)
         if num is not None:
             await reply_with_result(msg, num)
         else:
-            await msg.reply_text("❌ Не удалось распознать. Напиши число текстом (0-36).", reply_markup=main_keyboard())
+            await msg.reply_text("❌ Не распознано. Напиши число текстом.", reply_markup=main_keyboard())
         return
-    
-    # Текст
+
     text = msg.text or msg.caption or ""
     if not text: return
-    
-    logging.info(f"Ручной режим: '{text[:100]}'")
-    
     num = extract_number_from_text(text)
     if num is not None:
         await reply_with_result(msg, num)
         return
-    
     match = re.match(r'^\s*(\d{1,2})\s*$', text.strip())
     if match:
         num = int(match.group(1))
         if 0 <= num <= 36:
             await reply_with_result(msg, num)
 
-# ====== КНОПКИ ======
 async def btn_stats(update, context): 
     await update.message.reply_text(format_stats(get_stats()), reply_markup=main_keyboard())
 async def btn_patterns(update, context): 
@@ -265,13 +231,7 @@ async def btn_last(update, context):
     nums = [str(r[0]) for r in c.fetchall()]
     await update.message.reply_text(f"Последние 10: {' → '.join(nums)}" if nums else "Нет данных.", reply_markup=main_keyboard())
 async def btn_help(update, context):
-    await update.message.reply_text(
-        "🎰 Анализатор Бот Бандита\n\n"
-        "👥 Группа: добавь меня в чат с @banditchatbot\n"
-        "💬 Личка: перешли сообщение или скрин\n"
-        "🔢 Или просто напиши число 0-36",
-        reply_markup=main_keyboard()
-    )
+    await update.message.reply_text("🎰 Бот-анализатор\n\nГруппа: добавь с @banditchatbot\nЛичка: скрин или число", reply_markup=main_keyboard())
 async def btn_reset(update, context):
     if update.effective_user.id != OWNER_ID:
         await update.message.reply_text("⛔ Только @IIarmizan.", reply_markup=main_keyboard())
@@ -283,7 +243,6 @@ async def btn_reset(update, context):
     else:
         kb = [[InlineKeyboardButton("✅ Да", callback_data="reset_confirm"), InlineKeyboardButton("❌ Нет", callback_data="reset_cancel")]]
         await update.message.reply_text(f"⚠️ Удалить {count} записей?", reply_markup=InlineKeyboardMarkup(kb))
-
 async def reset_callback(update, context):
     q = update.callback_query
     await q.answer()
@@ -295,12 +254,10 @@ async def reset_callback(update, context):
     else: 
         await q.edit_message_text("❌ Отмена.")
 
-# ====== ЗАПУСК ======
 def main():
     TOKEN = os.environ.get("BOT_TOKEN")
     if not TOKEN: return
     app = ApplicationBuilder().token(TOKEN).build()
-    
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(MessageHandler(filters.PHOTO & filters.User(username=TARGET_BOT), auto_detect))
     app.add_handler(MessageHandler(filters.Regex("📊 Статистика"), btn_stats))
@@ -310,8 +267,7 @@ def main():
     app.add_handler(MessageHandler(filters.Regex("❓ Помощь"), btn_help))
     app.add_handler(CallbackQueryHandler(reset_callback, pattern="reset_"))
     app.add_handler(MessageHandler(filters.PHOTO | filters.TEXT | filters.CAPTION, handle_manual))
-    
-    logging.info("Бот запущен.")
+    logging.info("Бот запущен с PaddleOCR.")
     app.run_polling()
 
 if __name__ == '__main__':
