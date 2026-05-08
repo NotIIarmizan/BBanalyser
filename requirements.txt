@@ -2,3 +2,8 @@ python-telegram-bot
 Pillow
 paddlepaddle
 paddleocr
+pyclipper
+shapely
+lmdb
+opencv-python
+scikit-image
